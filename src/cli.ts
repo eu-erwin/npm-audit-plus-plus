@@ -83,6 +83,7 @@ program
 program
   .description("npm audit --json | npx npm-audit-plus-plus")
   .option("--debug", "display debug information")
+  .option("-s, --severity [SEVERITY]", "Severity level to treat as error (low, mod, high), default: critical", "critical")
   .action(() => {
     // read the options
     const options = program.opts();
@@ -128,12 +129,12 @@ program
         if (options.debug) {
           console.log("Using v2");
         }
-        xml = v2(input);
+        xml = v2(input, options.severity);
       } else {
         if (options.debug) {
           console.log("Using v1");
         }
-        xml = v1(input);
+        xml = v1(input, options.severity);
       }
       // when all ok, create success XML and short circuit
       console.log(xml);
@@ -148,7 +149,7 @@ program
 
 program.parse(process.argv);
 
-const v1 = (input: Input) => {
+const v1 = (input: Input, severity: "low" | "mod" | "high") => {
   const critCount = input.metadata.vulnerabilities.critical;
   const highCount = input.metadata.vulnerabilities.high;
   const modCount = input.metadata.vulnerabilities.moderate;
@@ -221,12 +222,25 @@ const v1 = (input: Input) => {
     } as any);
   }
 
+  let errors = critCount;
+  switch(severity) {
+    case "low":
+      errors = lowCount + modCount + highCount + critCount;
+      break;
+    case "mod":
+      errors = modCount + highCount + critCount;
+      break;
+    case "high":
+      errors = highCount + critCount;
+      break;
+  }
+
   const obj = {
     testsuites: {
       testsuite: {
         "@name": "NPM Audit Summary",
-        "@errors": critCount,
-        "@failures": critCount,
+        "@errors": errors,
+        "@failures": errors,
         "@tests": critCount + highCount + modCount + lowCount + infoCount,
         testcase,
       },
@@ -238,7 +252,7 @@ const v1 = (input: Input) => {
   return xml;
 };
 
-const v2 = (input: Input) => {
+const v2 = (input: Input, severity: "low" | "mod" | "high") => {
   const critCount = input.metadata.vulnerabilities.critical;
   const highCount = input.metadata.vulnerabilities.high;
   const modCount = input.metadata.vulnerabilities.moderate;
@@ -282,30 +296,31 @@ const v2 = (input: Input) => {
     },
   ];
 
-  for (const vulnerability in input.vulnerabilities) {
+  const vulnerabilities = input.vulnerabilities ?? {};
+  for (const vulnerability in vulnerabilities) {
     const failure =
-      input.vulnerabilities[vulnerability].severity === "critical"
+      vulnerabilities[vulnerability].severity === "critical"
         ? {
             "@message":
-              input.vulnerabilities[vulnerability].name +
+              vulnerabilities[vulnerability].name +
               " - " +
-              (input.vulnerabilities[vulnerability].effect && input.vulnerabilities[vulnerability].effect.length > 0 ? input.vulnerabilities[vulnerability].effect[0] : input.vulnerabilities[vulnerability].via[0].title),
+              (vulnerabilities[vulnerability].effect && vulnerabilities[vulnerability].effect.length > 0 ? vulnerabilities[vulnerability].effect[0] : vulnerabilities[vulnerability].via[0].title),
             "@type": "error",
             "#text":
-              input.vulnerabilities[vulnerability].name +
+              vulnerabilities[vulnerability].name +
               " - " +
-              input.vulnerabilities[vulnerability].via[0].name +
+              vulnerabilities[vulnerability].via[0].name +
               " - " +
-              (input.vulnerabilities[vulnerability].effect && input.vulnerabilities[vulnerability].effect.length > 0 ? input.vulnerabilities[vulnerability].effect[0] : input.vulnerabilities[vulnerability].via[0].title) +
+              (vulnerabilities[vulnerability].effect && vulnerabilities[vulnerability].effect.length > 0 ? vulnerabilities[vulnerability].effect[0] : vulnerabilities[vulnerability].via[0].title) +
               "\n\nFix available:\n\n" +
-              input.vulnerabilities[vulnerability].fixAvailable.name +
+              vulnerabilities[vulnerability].fixAvailable.name +
               "@" +
-              input.vulnerabilities[vulnerability].fixAvailable.version,
+              vulnerabilities[vulnerability].fixAvailable.version,
           }
         : null;
 
     const viaJoined: string[] = [];
-    const via = input.vulnerabilities[vulnerability].via;
+    const via = vulnerabilities[vulnerability].via;
     via.forEach((v) => {
       if (typeof v === "string") {
         viaJoined.push(v);
@@ -316,24 +331,37 @@ const v2 = (input: Input) => {
 
     testcase.push({
       "@classname":
-        input.vulnerabilities[vulnerability].name +
+        vulnerabilities[vulnerability].name +
         "@" +
-        input.vulnerabilities[vulnerability].range +
+        vulnerabilities[vulnerability].range +
         " (" +
-        input.vulnerabilities[vulnerability].severity +
+        vulnerabilities[vulnerability].severity +
         ")",
       "@name":
-        viaJoined.join(" -> ") + input.vulnerabilities[vulnerability].name,
+        viaJoined.join(" -> ") + vulnerabilities[vulnerability].name,
       "@time": "0",
       failure,
     } as any);
+  }
+
+  let errors = critCount;
+  switch(severity) {
+    case "low":
+      errors = lowCount + modCount + highCount + critCount;
+      break;
+    case "mod":
+      errors = modCount + highCount + critCount;
+      break;
+    case "high":
+      errors = highCount + critCount;
+      break;
   }
 
   const root = {
     testsuites: {
       testsuite: {
         "@name": "NPM AUdit Summary v2",
-        "@errors": critCount,
+        "@errors": errors,
         "@failures": 0,
         "@tests": depCount,
         testcase,
