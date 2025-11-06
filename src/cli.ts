@@ -4,32 +4,44 @@ import { Command } from "commander";
 const program = new Command();
 import { create } from "xmlbuilder2";
 
+interface Via {
+  "source": number,
+  "name": string,
+  "dependency": string,
+  "title": string,
+  "url": string,
+  "severity": "moderate" | "warning",
+  "cwe": Array<string>,
+  "cvss": {
+    "score": number,
+    "vectorString": string
+  },
+  "range": string
+}
+
+interface Resolution {
+  name: string;
+  version: string;
+  isSemVerMajor: boolean;
+}
+
+interface Vulnerability {
+  name: string;
+  dependency: string;
+  severity: string;
+  isDirect: boolean;
+  via: Array<Via | string>;
+  effect: string[];
+  range: string;
+  nodes: string[];
+  fixAvailable: Resolution | boolean;
+}
+
+type Vulnerabilities = Map<string, Vulnerability>;
+
 interface Input {
   auditReportVersion?: number; // for version 2 or the audit report
-  vulnerabilities?: {
-    [key: string]: {
-      name: string;
-      severity: string;
-      isDirect: boolean;
-      via: [
-        {
-          source: string;
-          name: string;
-          url: string;
-          dependency: string;
-          title: string;
-        }
-      ];
-      effect: string[];
-      range: string;
-      nodes: string[];
-      fixAvailable: {
-        name: string;
-        version: string;
-        isSemVerMajor: boolean;
-      };
-    };
-  };
+  vulnerabilities?: Vulnerabilities;
   // below is version 1
   metadata: {
     vulnerabilities: {
@@ -124,7 +136,7 @@ program
         });
       }
 
-      let xml = "";
+      let xml: string;
       if (input.auditReportVersion == 2) {
         if (options.debug) {
           console.log("Using v2");
@@ -165,7 +177,7 @@ const v1 = (input: Input, severity: "low" | "mod" | "high") => {
     infoCount === 0
   ) {
     const empty = create({ version: "1.0" })
-      .ele("testsuits")
+      .ele("testsuites")
       .ele("testsuite", {
         name: "NPM Audit Summary v1",
         errors: 0,
@@ -176,9 +188,7 @@ const v1 = (input: Input, severity: "low" | "mod" | "high") => {
         classname: "Summary",
         name: `Critical: 0, High: 0, Moderate: 0, Low: 0, Info: 0, Dependencies: ${depCount}`,
       });
-
-    const xml = empty.end({ prettyPrint: true });
-    return xml;
+    return empty.end({ prettyPrint: true });
   }
 
   // else, some vulnerabilities were found, create failure XML
@@ -248,8 +258,7 @@ const v1 = (input: Input, severity: "low" | "mod" | "high") => {
   };
 
   const doc = create(obj);
-  const xml = doc.end({ prettyPrint: true });
-  return xml;
+  return doc.end({ prettyPrint: true });
 };
 
 const v2 = (input: Input, severity: "low" | "mod" | "high") => {
@@ -283,66 +292,18 @@ const v2 = (input: Input, severity: "low" | "mod" | "high") => {
       },
     };
     const doc = create(empty);
-    const xml = doc.end({ prettyPrint: true });
-    return xml;
+    return doc.end({ prettyPrint: true });
   }
 
   // when critical vulnerabilities are found, create failure XML
-  const testcase = [
-    {
-      "@classname": "Summary",
-      "@name": `Critical: ${critCount}, High: ${highCount}, Moderate: ${modCount}, Low: ${lowCount}, Info: ${infoCount}, Dependencies: ${depCount}`,
-      "@time": "0",
-    },
-  ];
-
-  const vulnerabilities = input.vulnerabilities ?? {};
-  for (const vulnerability in vulnerabilities) {
-    const failure =
-      vulnerabilities[vulnerability].severity === "critical"
-        ? {
-            "@message":
-              vulnerabilities[vulnerability].name +
-              " - " +
-              (vulnerabilities[vulnerability].effect && vulnerabilities[vulnerability].effect.length > 0 ? vulnerabilities[vulnerability].effect[0] : vulnerabilities[vulnerability].via[0].title),
-            "@type": "error",
-            "#text":
-              vulnerabilities[vulnerability].name +
-              " - " +
-              vulnerabilities[vulnerability].via[0].name +
-              " - " +
-              (vulnerabilities[vulnerability].effect && vulnerabilities[vulnerability].effect.length > 0 ? vulnerabilities[vulnerability].effect[0] : vulnerabilities[vulnerability].via[0].title) +
-              "\n\nFix available:\n\n" +
-              vulnerabilities[vulnerability].fixAvailable.name +
-              "@" +
-              vulnerabilities[vulnerability].fixAvailable.version,
-          }
-        : null;
-
-    const viaJoined: string[] = [];
-    const via = vulnerabilities[vulnerability].via;
-    via.forEach((v) => {
-      if (typeof v === "string") {
-        viaJoined.push(v);
-      } else {
-        viaJoined.push(v.title + "\n" + v.url);
-      }
-    });
-
-    testcase.push({
-      "@classname":
-        vulnerabilities[vulnerability].name +
-        "@" +
-        vulnerabilities[vulnerability].range +
-        " (" +
-        vulnerabilities[vulnerability].severity +
-        ")",
-      "@name":
-        viaJoined.join(" -> ") + vulnerabilities[vulnerability].name,
-      "@time": "0",
-      failure,
-    } as any);
-  }
+  const vulnerabilities = (input.vulnerabilities ?? {}) as Map<string, Vulnerability>;
+  const testcase = Object.values(vulnerabilities).map((vulnerability: Vulnerability) => ({
+    "@package": vulnerability.name,
+    "@name": vulnerability.name,
+    "@severity": vulnerability.severity,
+    "@time": "0",
+    "failure": vulnerability.via.map((v) => ViaProcessor(vulnerability, v)),
+  }));
 
   let errors = critCount;
   switch(severity) {
@@ -358,17 +319,71 @@ const v2 = (input: Input, severity: "low" | "mod" | "high") => {
   }
 
   const root = {
-    testsuites: {
-      testsuite: {
-        "@name": "NPM AUdit Summary v2",
-        "@errors": errors,
-        "@failures": 0,
-        "@tests": depCount,
-        testcase,
-      },
+    testsuite: {
+      "@name": "NPM Audit Summary v2",
+      "@errors": errors,
+      "@failures": 0,
+      "@tests": depCount,
+      testcase,
     },
   };
   const doc = create(root);
-  const xml = doc.end({ prettyPrint: true });
-  return xml;
+  return doc.end({ prettyPrint: true });
 };
+
+function ViaProcessor(vulnerability: Vulnerability, via: Via | string): object {
+  const result = ViaObjectProcessor(vulnerability, via);
+  if (result) {
+    return result;
+  }
+
+  return ViaStringProcessor(vulnerability, via) as object;
+}
+
+function ViaObjectProcessor(vulnerability: Vulnerability, via: Via | string): object | undefined {
+  if (typeof via === "string") {
+    return undefined;
+  }
+
+  const messages = `${via.title}
+
+Severity: ${via.severity}
+Direct dependency: ${vulnerability.isDirect}
+Version: ${via.range}
+Url: ${via.url}
+
+CWE: 
+${via.cwe.join("\n")}
+
+Resolution: ${ParseResolution(vulnerability.fixAvailable)}
+`;
+  return {
+    "@type": "error",
+    "#text": messages,
+  };
+}
+
+function ViaStringProcessor(vulnerability: Vulnerability, via: Via | string): object | undefined {
+  if (typeof via !== "string") {
+    return undefined;
+  }
+
+  const messages = `${via}
+
+Severity: ${vulnerability.severity}
+Direct dependency: ${vulnerability.isDirect}
+Version: ${vulnerability.range}
+`;
+  return {
+    "@type": "error",
+    "#text": messages,
+  };
+}
+
+function ParseResolution(resolution: Resolution | boolean): string {
+  if (typeof resolution === "boolean") {
+    return "true";
+  }
+
+  return `${resolution.name} (${resolution.version})`;
+}
