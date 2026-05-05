@@ -7,10 +7,11 @@ var xmlbuilder2_1 = require("xmlbuilder2");
 program
     .name("npm-audit-plus-plus")
     .description("A tool to capture the output of npm audit and convert it to xml")
-    .version("1.1.0");
+    .version("1.1.1");
 program
     .description("npm audit --json | npx npm-audit-plus-plus")
     .option("--debug", "display debug information")
+    .option("-s, --severity [SEVERITY]", "Severity level to treat as error (low, mod, high), default: critical", "critical")
     .action(function () {
     // read the options
     var options = program.opts();
@@ -48,18 +49,18 @@ program
                 info: infoCount,
             });
         }
-        var xml = "";
+        var xml;
         if (input.auditReportVersion == 2) {
             if (options.debug) {
                 console.log("Using v2");
             }
-            xml = v2(input);
+            xml = v2(input, options.severity);
         }
         else {
             if (options.debug) {
                 console.log("Using v1");
             }
-            xml = v1(input);
+            xml = v1(input, options.severity);
         }
         // when all ok, create success XML and short circuit
         console.log(xml);
@@ -72,7 +73,7 @@ program
     });
 });
 program.parse(process.argv);
-var v1 = function (input) {
+var v1 = function (input, severity) {
     var critCount = input.metadata.vulnerabilities.critical;
     var highCount = input.metadata.vulnerabilities.high;
     var modCount = input.metadata.vulnerabilities.moderate;
@@ -85,7 +86,7 @@ var v1 = function (input) {
         lowCount === 0 &&
         infoCount === 0) {
         var empty = (0, xmlbuilder2_1.create)({ version: "1.0" })
-            .ele("testsuits")
+            .ele("testsuites")
             .ele("testsuite", {
             name: "NPM Audit Summary v1",
             errors: 0,
@@ -96,8 +97,7 @@ var v1 = function (input) {
             classname: "Summary",
             name: "Critical: 0, High: 0, Moderate: 0, Low: 0, Info: 0, Dependencies: ".concat(depCount),
         });
-        var xml_1 = empty.end({ prettyPrint: true });
-        return xml_1;
+        return empty.end({ prettyPrint: true });
     }
     // else, some vulnerabilities were found, create failure XML
     var testcase = [
@@ -134,22 +134,34 @@ var v1 = function (input) {
             failure: failure,
         });
     }
+    var errors = critCount;
+    switch (severity) {
+        case "low":
+            errors = lowCount + modCount + highCount + critCount;
+            break;
+        case "mod":
+            errors = modCount + highCount + critCount;
+            break;
+        case "high":
+            errors = highCount + critCount;
+            break;
+    }
     var obj = {
         testsuites: {
             testsuite: {
                 "@name": "NPM Audit Summary",
-                "@errors": critCount,
-                "@failures": critCount,
+                "@errors": errors,
+                "@failures": errors,
                 "@tests": critCount + highCount + modCount + lowCount + infoCount,
                 testcase: testcase,
             },
         },
     };
     var doc = (0, xmlbuilder2_1.create)(obj);
-    var xml = doc.end({ prettyPrint: true });
-    return xml;
+    return doc.end({ prettyPrint: true });
 };
-var v2 = function (input) {
+var v2 = function (input, severity) {
+    var _a;
     var critCount = input.metadata.vulnerabilities.critical;
     var highCount = input.metadata.vulnerabilities.high;
     var modCount = input.metadata.vulnerabilities.moderate;
@@ -177,72 +189,71 @@ var v2 = function (input) {
             },
         };
         var doc_1 = (0, xmlbuilder2_1.create)(empty);
-        var xml_2 = doc_1.end({ prettyPrint: true });
-        return xml_2;
+        return doc_1.end({ prettyPrint: true });
     }
     // when critical vulnerabilities are found, create failure XML
-    var testcase = [
-        {
-            "@classname": "Summary",
-            "@name": "Critical: ".concat(critCount, ", High: ").concat(highCount, ", Moderate: ").concat(modCount, ", Low: ").concat(lowCount, ", Info: ").concat(infoCount, ", Dependencies: ").concat(depCount),
-            "@time": "0",
-        },
-    ];
-    var _loop_1 = function (vulnerability) {
-        var failure = input.vulnerabilities[vulnerability].severity === "critical"
-            ? {
-                "@message": input.vulnerabilities[vulnerability].name +
-                    " - " +
-                    (input.vulnerabilities[vulnerability].effect && input.vulnerabilities[vulnerability].effect.length > 0 ? input.vulnerabilities[vulnerability].effect[0] : input.vulnerabilities[vulnerability].via[0].title),
-                "@type": "error",
-                "#text": input.vulnerabilities[vulnerability].name +
-                    " - " +
-                    input.vulnerabilities[vulnerability].via[0].name +
-                    " - " +
-                    (input.vulnerabilities[vulnerability].effect && input.vulnerabilities[vulnerability].effect.length > 0 ? input.vulnerabilities[vulnerability].effect[0] : input.vulnerabilities[vulnerability].via[0].title) +
-                    "\n\nFix available:\n\n" +
-                    input.vulnerabilities[vulnerability].fixAvailable.name +
-                    "@" +
-                    input.vulnerabilities[vulnerability].fixAvailable.version,
-            }
-            : null;
-        var viaJoined = [];
-        var via = input.vulnerabilities[vulnerability].via;
-        via.forEach(function (v) {
-            if (typeof v === "string") {
-                viaJoined.push(v);
-            }
-            else {
-                viaJoined.push(v.title + "\n" + v.url);
-            }
-        });
-        testcase.push({
-            "@classname": input.vulnerabilities[vulnerability].name +
-                "@" +
-                input.vulnerabilities[vulnerability].range +
-                " (" +
-                input.vulnerabilities[vulnerability].severity +
-                ")",
-            "@name": viaJoined.join(" -> ") + input.vulnerabilities[vulnerability].name,
-            "@time": "0",
-            failure: failure,
-        });
-    };
-    for (var vulnerability in input.vulnerabilities) {
-        _loop_1(vulnerability);
+    var vulnerabilities = ((_a = input.vulnerabilities) !== null && _a !== void 0 ? _a : {});
+    var testcase = Object.values(vulnerabilities).map(function (vulnerability) { return ({
+        "@package": vulnerability.name,
+        "@name": vulnerability.name,
+        "@severity": vulnerability.severity,
+        "@time": "0",
+        "failure": vulnerability.via.map(function (v) { return ViaProcessor(vulnerability, v); }),
+    }); });
+    var errors = critCount;
+    switch (severity) {
+        case "low":
+            errors = lowCount + modCount + highCount + critCount;
+            break;
+        case "mod":
+            errors = modCount + highCount + critCount;
+            break;
+        case "high":
+            errors = highCount + critCount;
+            break;
     }
     var root = {
-        testsuites: {
-            testsuite: {
-                "@name": "NPM AUdit Summary v2",
-                "@errors": critCount,
-                "@failures": 0,
-                "@tests": depCount,
-                testcase: testcase,
-            },
+        testsuite: {
+            "@name": "NPM Audit Summary v2",
+            "@errors": errors,
+            "@failures": 0,
+            "@tests": depCount,
+            testcase: testcase,
         },
     };
     var doc = (0, xmlbuilder2_1.create)(root);
-    var xml = doc.end({ prettyPrint: true });
-    return xml;
+    return doc.end({ prettyPrint: true });
 };
+function ViaProcessor(vulnerability, via) {
+    var result = ViaObjectProcessor(vulnerability, via);
+    if (result) {
+        return result;
+    }
+    return ViaStringProcessor(vulnerability, via);
+}
+function ViaObjectProcessor(vulnerability, via) {
+    if (typeof via === "string") {
+        return undefined;
+    }
+    var messages = "".concat(via.title, "\n\nSeverity: ").concat(via.severity, "\nDirect dependency: ").concat(vulnerability.isDirect, "\nVersion: ").concat(via.range, "\nUrl: ").concat(via.url, "\n\nCWE: \n").concat(via.cwe.join("\n"), "\n\nResolution: ").concat(ParseResolution(vulnerability.fixAvailable), "\n");
+    return {
+        "@type": "error",
+        "#text": messages,
+    };
+}
+function ViaStringProcessor(vulnerability, via) {
+    if (typeof via !== "string") {
+        return undefined;
+    }
+    var messages = "".concat(via, "\n\nSeverity: ").concat(vulnerability.severity, "\nDirect dependency: ").concat(vulnerability.isDirect, "\nVersion: ").concat(vulnerability.range, "\n");
+    return {
+        "@type": "error",
+        "#text": messages,
+    };
+}
+function ParseResolution(resolution) {
+    if (typeof resolution === "boolean") {
+        return "true";
+    }
+    return "".concat(resolution.name, " (").concat(resolution.version, ")");
+}
